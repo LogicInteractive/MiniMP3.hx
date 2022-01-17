@@ -1,5 +1,6 @@
 # MiniMP3.hx
-MP3 decoder for native platforms using Haxe with hxcpp / c++ 
+MP3 decoder for native platforms using Haxe with hxcpp / c++
+
 Haxe externs and implementation of MP3 decoding using MiniMP3.
 
 Basic example:
