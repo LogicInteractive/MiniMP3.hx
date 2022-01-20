@@ -25,7 +25,6 @@ import cpp.NativeString;
 #include <stdint.h>    
 
 #define MINIMP3_IMPLEMENTATION
-#define MINIMP3_ONLY_MP3 //Drop MP1 / MP2 support
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -343,174 +342,6 @@ static int hdr_padding(const uint8_t *h)
 {
     return HDR_TEST_PADDING(h) ? (HDR_IS_LAYER_1(h) ? 4 : 1) : 0;
 }
-
-#ifndef MINIMP3_ONLY_MP3
-static const L12_subband_alloc_t *L12_subband_alloc_table(const uint8_t *hdr, L12_scale_info *sci)
-{
-    const L12_subband_alloc_t *alloc;
-    int mode = HDR_GET_STEREO_MODE(hdr);
-    int nbands, stereo_bands = (mode == MODE_MONO) ? 0 : (mode == MODE_JOINT_STEREO) ? (HDR_GET_STEREO_MODE_EXT(hdr) << 2) + 4 : 32;
-
-    if (HDR_IS_LAYER_1(hdr))
-    {
-        static const L12_subband_alloc_t g_alloc_L1[] = { { 76, 4, 32 } };
-        alloc = g_alloc_L1;
-        nbands = 32;
-    } else if (!HDR_TEST_MPEG1(hdr))
-    {
-        static const L12_subband_alloc_t g_alloc_L2M2[] = { { 60, 4, 4 }, { 44, 3, 7 }, { 44, 2, 19 } };
-        alloc = g_alloc_L2M2;
-        nbands = 30;
-    } else
-    {
-        static const L12_subband_alloc_t g_alloc_L2M1[] = { { 0, 4, 3 }, { 16, 4, 8 }, { 32, 3, 12 }, { 40, 2, 7 } };
-        int sample_rate_idx = HDR_GET_SAMPLE_RATE(hdr);
-        unsigned kbps = hdr_bitrate_kbps(hdr) >> (int)(mode != MODE_MONO);
-        if (!kbps) /* free-format */
-        {
-            kbps = 192;
-        }
-
-        alloc = g_alloc_L2M1;
-        nbands = 27;
-        if (kbps < 56)
-        {
-            static const L12_subband_alloc_t g_alloc_L2M1_lowrate[] = { { 44, 4, 2 }, { 44, 3, 10 } };
-            alloc = g_alloc_L2M1_lowrate;
-            nbands = sample_rate_idx == 2 ? 12 : 8;
-        } else if (kbps >= 96 && sample_rate_idx != 1)
-        {
-            nbands = 30;
-        }
-    }
-
-    sci->total_bands = (uint8_t)nbands;
-    sci->stereo_bands = (uint8_t)MINIMP3_MIN(stereo_bands, nbands);
-
-    return alloc;
-}
-
-static void L12_read_scalefactors(bs_t *bs, uint8_t *pba, uint8_t *scfcod, int bands, float *scf)
-{
-    static const float g_deq_L12[18*3] = {
-#define DQ(x) 9.53674316e-07f/x, 7.56931807e-07f/x, 6.00777173e-07f/x
-        DQ(3),DQ(7),DQ(15),DQ(31),DQ(63),DQ(127),DQ(255),DQ(511),DQ(1023),DQ(2047),DQ(4095),DQ(8191),DQ(16383),DQ(32767),DQ(65535),DQ(3),DQ(5),DQ(9)
-    };
-    int i, m;
-    for (i = 0; i < bands; i++)
-    {
-        float s = 0;
-        int ba = *pba++;
-        int mask = ba ? 4 + ((19 >> scfcod[i]) & 3) : 0;
-        for (m = 4; m; m >>= 1)
-        {
-            if (mask & m)
-            {
-                int b = get_bits(bs, 6);
-                s = g_deq_L12[ba*3 - 6 + b % 3]*(1 << 21 >> b/3);
-            }
-            *scf++ = s;
-        }
-    }
-}
-
-static void L12_read_scale_info(const uint8_t *hdr, bs_t *bs, L12_scale_info *sci)
-{
-    static const uint8_t g_bitalloc_code_tab[] = {
-        0,17, 3, 4, 5,6,7, 8,9,10,11,12,13,14,15,16,
-        0,17,18, 3,19,4,5, 6,7, 8, 9,10,11,12,13,16,
-        0,17,18, 3,19,4,5,16,
-        0,17,18,16,
-        0,17,18,19, 4,5,6, 7,8, 9,10,11,12,13,14,15,
-        0,17,18, 3,19,4,5, 6,7, 8, 9,10,11,12,13,14,
-        0, 2, 3, 4, 5,6,7, 8,9,10,11,12,13,14,15,16
-    };
-    const L12_subband_alloc_t *subband_alloc = L12_subband_alloc_table(hdr, sci);
-
-    int i, k = 0, ba_bits = 0;
-    const uint8_t *ba_code_tab = g_bitalloc_code_tab;
-
-    for (i = 0; i < sci->total_bands; i++)
-    {
-        uint8_t ba;
-        if (i == k)
-        {
-            k += subband_alloc->band_count;
-            ba_bits = subband_alloc->code_tab_width;
-            ba_code_tab = g_bitalloc_code_tab + subband_alloc->tab_offset;
-            subband_alloc++;
-        }
-        ba = ba_code_tab[get_bits(bs, ba_bits)];
-        sci->bitalloc[2*i] = ba;
-        if (i < sci->stereo_bands)
-        {
-            ba = ba_code_tab[get_bits(bs, ba_bits)];
-        }
-        sci->bitalloc[2*i + 1] = sci->stereo_bands ? ba : 0;
-    }
-
-    for (i = 0; i < 2*sci->total_bands; i++)
-    {
-        sci->scfcod[i] = sci->bitalloc[i] ? HDR_IS_LAYER_1(hdr) ? 2 : get_bits(bs, 2) : 6;
-    }
-
-    L12_read_scalefactors(bs, sci->bitalloc, sci->scfcod, sci->total_bands*2, sci->scf);
-
-    for (i = sci->stereo_bands; i < sci->total_bands; i++)
-    {
-        sci->bitalloc[2*i + 1] = 0;
-    }
-}
-
-static int L12_dequantize_granule(float *grbuf, bs_t *bs, L12_scale_info *sci, int group_size)
-{
-    int i, j, k, choff = 576;
-    for (j = 0; j < 4; j++)
-    {
-        float *dst = grbuf + group_size*j;
-        for (i = 0; i < 2*sci->total_bands; i++)
-        {
-            int ba = sci->bitalloc[i];
-            if (ba != 0)
-            {
-                if (ba < 17)
-                {
-                    int half = (1 << (ba - 1)) - 1;
-                    for (k = 0; k < group_size; k++)
-                    {
-                        dst[k] = (float)((int)get_bits(bs, ba) - half);
-                    }
-                } else
-                {
-                    unsigned mod = (2 << (ba - 17)) + 1;    /* 3, 5, 9 */
-                    unsigned code = get_bits(bs, mod + 2 - (mod >> 3));  /* 5, 7, 10 */
-                    for (k = 0; k < group_size; k++, code /= mod)
-                    {
-                        dst[k] = (float)((int)(code % mod - mod/2));
-                    }
-                }
-            }
-            dst += choff;
-            choff = 18 - choff;
-        }
-    }
-    return group_size*4;
-}
-
-static void L12_apply_scf_384(L12_scale_info *sci, const float *scf, float *dst)
-{
-    int i, k;
-    memcpy(dst + 576 + sci->stereo_bands*18, dst + sci->stereo_bands*18, (sci->total_bands - sci->stereo_bands)*18*sizeof(float));
-    for (i = 0; i < sci->total_bands; i++, dst += 18, scf += 6)
-    {
-        for (k = 0; k < 12; k++)
-        {
-            dst[k + 0]   *= scf[0];
-            dst[k + 576] *= scf[3];
-        }
-    }
-}
-#endif /* MINIMP3_ONLY_MP3 */
 
 static int L3_read_side_info(bs_t *bs, L3_gr_info_t *gr, const uint8_t *hdr)
 {
@@ -1806,32 +1637,10 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
             }
         }
         L3_save_reservoir(dec, &scratch);
-    } else
+    }
+    else
     {
-#ifdef MINIMP3_ONLY_MP3
         return 0;
-#else /* MINIMP3_ONLY_MP3 */
-        L12_scale_info sci[1];
-        L12_read_scale_info(hdr, bs_frame, sci);
-
-        memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
-        for (i = 0, igr = 0; igr < 3; igr++)
-        {
-            if (12 == (i += L12_dequantize_granule(scratch.grbuf[0] + i, bs_frame, sci, info->layer | 1)))
-            {
-                i = 0;
-                L12_apply_scf_384(sci, sci->scf + igr, scratch.grbuf[0]);
-                mp3d_synth_granule(dec->qmf_state, scratch.grbuf[0], 12, info->channels, pcm, scratch.syn[0]);
-                memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
-                pcm += 384*info->channels;
-            }
-            if (bs_frame->pos > bs_frame->limit)
-            {
-                mp3dec_init(dec);
-                return 0;
-            }
-        }
-#endif /* MINIMP3_ONLY_MP3 */
     }
     return success*hdr_frame_samples(dec->header);
 }
@@ -1899,7 +1708,6 @@ void mp3dec_f32_to_s16(const float *in, int16_t *out, int num_samples)
 
 int8_t* DecodeMp3ToBuffer(unsigned char *buf, int music_size, uint32_t *sampleRate, uint32_t *totalSampleCount, unsigned int *channels)
 {
-
     int alloc_samples = 1024 * 1024, num_samples = 0;
     int8_t *music_buf = (int8_t *)malloc(alloc_samples * 2);
     if (buf != NULL)
